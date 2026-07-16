@@ -119,6 +119,7 @@ select.topbar-btn { cursor: pointer; }
 .type-badge { font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; }
 .b-prompt { background: var(--badge-prompt-bg); color: var(--badge-prompt); }
 .b-skill  { background: var(--badge-skill-bg);  color: var(--badge-skill);  }
+.b-json   { background: #FFF7ED; color: #9A3412; }
 
 /* tooltip for truncated text */
 .card-text { font-size: 12.5px; color: var(--text-2); line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; position: relative; }
@@ -309,6 +310,34 @@ textarea.f-input { resize: vertical; min-height: 96px; line-height: 1.6; }
       <label class="f-label">内容</label>
       <textarea class="f-input" id="fContent" placeholder="粘贴完整提示词或 Skill 描述…"></textarea>
     </div>
+
+    <!-- Prompt source: text or JSON file (only shown for Prompt type) -->
+    <div id="promptSourceRow">
+      <label class="f-label">提示词来源</label>
+      <div class="type-tog">
+        <button class="t-opt p-sel" id="promptModeText" onclick="selPromptMode('text')">
+          <i class="ti ti-copy"></i> 直接输入
+        </button>
+        <button class="t-opt" id="promptModeJson" onclick="selPromptMode('json')">
+          <i class="ti ti-file-type-json"></i> JSON 文件
+        </button>
+      </div>
+
+      <div id="jsonFileRow" style="display:none;margin-top:8px">
+        <input type="file" id="jsonFile" accept=".json,application/json" style="display:none" onchange="onJsonPick(event)">
+        <div class="img-drop" id="jsonDrop" style="border-color:#fb923c;background:#fff7ed">
+          <i class="ti ti-file-type-json" style="color:#c2410c"></i>
+          <div class="dt" style="color:#9a3412">点击上传 JSON 提示词</div>
+          <div class="ds">上传后自动校验并读取，也可以直接在内容框中粘贴 JSON</div>
+        </div>
+        <div id="jsonFileName" style="display:none;margin-top:6px;font-size:12px;color:#9a3412;align-items:center;gap:6px">
+          <i class="ti ti-file-check"></i>
+          <span id="jsonFileNameText"></span>
+          <button onclick="clearJsonFile()" style="border:none;background:none;cursor:pointer;color:var(--text-3);font-size:13px;margin-left:auto"><i class="ti ti-x"></i></button>
+        </div>
+      </div>
+    </div>
+
     <!-- Skill MD upload (only shown for Skill type) -->
     <div id="skillFileRow" style="display:none">
       <label class="f-label">上传 Skill 文件 <span class="f-hint">.md 文件，内容会自动填入下方</span></label>
@@ -326,7 +355,7 @@ textarea.f-input { resize: vertical; min-height: 96px; line-height: 1.6; }
     </div>
     <!-- Effect image upload -->
     <div id="imgUploadRow">
-      <label class="f-label">效果配图 <span class="f-hint">上传用这条提示词生成的效果图（仅页面内有效，刷新后需重新上传；导出JSON可永久保留）</span></label>
+      <label class="f-label">效果配图 <span class="f-hint">上传用这条提示词生成的效果图（保存在当前浏览器；导出数据可一起备份）</span></label>
       <input type="file" id="imgFile" accept="image/*" style="display:none" onchange="onImgPick(event)">
       <div class="img-drop" id="imgDrop">
         <i class="ti ti-photo-plus"></i>
@@ -445,6 +474,8 @@ async function dbGetAllImgs() {
 let items = loadTextData();
 let tagOrder = loadTagOrder();   // custom tag ordering
 let typeFilter = 'all', activeTag = '', editId = null, fRating = 0, fType = 'prompt', fImg = '';
+let fContentFormat = 'text';     // text | json | md
+let fSourceFileName = '';
 // card drag state
 let dragSrcId = null;
 // tag drag state
@@ -455,8 +486,12 @@ function loadTextData() {
     const r = localStorage.getItem(STORE_KEY);
     if (r) {
       const parsed = JSON.parse(r);
-      // migrate old img field out if present
-      parsed.forEach(item => { if (item.img) { delete item.img; } });
+      // migrate old img field out if present, and add content format metadata
+      parsed.forEach(item => {
+        if (item.img) delete item.img;
+        if (!item.contentFormat) item.contentFormat = item.type === 'skill' ? 'md' : 'text';
+        if (!item.sourceFileName) item.sourceFileName = '';
+      });
       return parsed;
     }
   } catch(e) {}
@@ -581,10 +616,15 @@ function downloadSkill(name, content, e) {
 // ═══════════════════════════════════════════
 function openModal(prefillTag) {
   editId = null; fRating = 0; fType = 'prompt'; fImg = '';
+  fContentFormat = 'text';
+  fSourceFileName = '';
   document.getElementById('modalTitle').textContent = '新建';
-  selType('prompt');
   document.getElementById('fName').value = '';
   document.getElementById('fContent').value = '';
+  document.getElementById('jsonFile').value = '';
+  document.getElementById('mdFile').value = '';
+  selType('prompt');
+  selPromptMode('text');
   // auto-fill tag from current context
   if (prefillTag !== undefined) {
     document.getElementById('fTags').value = prefillTag;
@@ -604,6 +644,8 @@ function editItem(id, e) {
   const item = items.find(i => i.id === id); if (!item) return;
   editId = id;
   document.getElementById('modalTitle').textContent = '编辑';
+  fContentFormat = item.contentFormat || (item.type === 'skill' ? 'md' : 'text');
+  fSourceFileName = item.sourceFileName || '';
   selType(item.type);
   document.getElementById('fName').value = item.name;
   document.getElementById('fContent').value = item.content;
@@ -628,14 +670,95 @@ function closeModal() { document.getElementById('overlay').classList.remove('ope
 function overlayBg(e) { if (e.target === document.getElementById('overlay')) closeModal(); }
 
 function selType(t) {
+  const previousType = fType;
   fType = t;
   document.getElementById('optP').className = 't-opt' + (t==='prompt' ? ' p-sel' : '');
   document.getElementById('optS').className = 't-opt' + (t==='skill'  ? ' s-sel' : '');
+
   const isSkill = t === 'skill';
+  document.getElementById('promptSourceRow').style.display = isSkill ? 'none' : 'block';
   document.getElementById('skillFileRow').style.display = isSkill ? 'block' : 'none';
-  document.getElementById('fContent').placeholder = isSkill
-    ? '粘贴 Skill 内容，或上传 .md 文件自动填入…'
-    : '粘贴完整提示词或 Skill 描述…';
+
+  if (isSkill) {
+    if (fContentFormat !== 'md') fContentFormat = 'md';
+    if (fSourceFileName && !/\.(md|txt)$/i.test(fSourceFileName)) fSourceFileName = '';
+    document.getElementById('fContent').placeholder = '粘贴 Skill 内容，或上传 .md 文件自动填入…';
+    renderSkillFileUI();
+  } else {
+    if (fContentFormat === 'md') {
+      fContentFormat = 'text';
+      if (/\.(md|txt)$/i.test(fSourceFileName)) fSourceFileName = '';
+    }
+    renderPromptSourceUI();
+  }
+}
+
+function selPromptMode(mode) {
+  fContentFormat = mode === 'json' ? 'json' : 'text';
+  if (fContentFormat === 'text') fSourceFileName = '';
+  renderPromptSourceUI();
+}
+
+function renderPromptSourceUI() {
+  const isJson = fContentFormat === 'json';
+  document.getElementById('promptModeText').className = 't-opt' + (!isJson ? ' p-sel' : '');
+  document.getElementById('promptModeJson').className = 't-opt' + (isJson ? ' p-sel' : '');
+  document.getElementById('jsonFileRow').style.display = isJson ? 'block' : 'none';
+  document.getElementById('fContent').placeholder = isJson
+    ? '上传 JSON 文件，或在这里粘贴完整 JSON 内容…'
+    : '粘贴完整提示词…';
+
+  const nameEl = document.getElementById('jsonFileName');
+  const drop = document.getElementById('jsonDrop');
+  if (isJson && fSourceFileName) {
+    document.getElementById('jsonFileNameText').textContent = fSourceFileName;
+    nameEl.style.display = 'flex';
+    drop.style.display = 'none';
+  } else {
+    nameEl.style.display = 'none';
+    drop.style.display = 'block';
+  }
+}
+
+function renderSkillFileUI() {
+  const nameEl = document.getElementById('mdFileName');
+  const drop = document.getElementById('mdDrop');
+  if (fType === 'skill' && fSourceFileName) {
+    document.getElementById('mdFileNameText').textContent = fSourceFileName;
+    nameEl.style.display = 'flex';
+    drop.style.display = 'none';
+  } else {
+    nameEl.style.display = 'none';
+    drop.style.display = 'block';
+  }
+}
+
+function onJsonPick(e) {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = ev => {
+    try {
+      const parsed = JSON.parse(ev.target.result);
+      document.getElementById('fContent').value = JSON.stringify(parsed, null, 2);
+      fContentFormat = 'json';
+      fSourceFileName = f.name;
+      if (!document.getElementById('fName').value.trim()) {
+        document.getElementById('fName').value = f.name.replace(/\.json$/i, '').replace(/[-_]/g, ' ');
+      }
+      renderPromptSourceUI();
+      showToast('JSON 已读取并校验 ✓');
+    } catch (err) {
+      showToast('JSON 格式错误，请检查文件');
+    }
+  };
+  r.readAsText(f, 'utf-8');
+  e.target.value = '';
+}
+
+function clearJsonFile() {
+  fSourceFileName = '';
+  document.getElementById('jsonFile').value = '';
+  renderPromptSourceUI();
 }
 
 function onImgPick(e) {
@@ -650,27 +773,22 @@ function onMdPick(e) {
   const f = e.target.files[0]; if (!f) return;
   const r = new FileReader();
   r.onload = ev => {
-    // fill content textarea
     document.getElementById('fContent').value = ev.target.result;
-    // auto-fill name from filename if name is empty
+    fContentFormat = 'md';
+    fSourceFileName = f.name;
     if (!document.getElementById('fName').value.trim()) {
       document.getElementById('fName').value = f.name.replace(/\.md$/i, '').replace(/[-_]/g, ' ');
     }
-    // show filename badge
-    const nameEl = document.getElementById('mdFileName');
-    const nameText = document.getElementById('mdFileNameText');
-    nameText.textContent = f.name;
-    nameEl.style.display = 'flex';
-    document.getElementById('mdDrop').style.display = 'none';
+    renderSkillFileUI();
     showToast('已读取 ' + f.name + ' ✓');
   };
   r.readAsText(f, 'utf-8');
   e.target.value = '';
 }
 function clearMd() {
-  document.getElementById('mdFileName').style.display = 'none';
-  document.getElementById('mdDrop').style.display = 'block';
+  fSourceFileName = '';
   document.getElementById('mdFile').value = '';
+  renderSkillFileUI();
 }
 function renderImgPrev() {
   const drop = document.getElementById('imgDrop');
@@ -692,18 +810,38 @@ async function saveItem() {
   const content = document.getElementById('fContent').value.trim();
   if (!name)    { document.getElementById('fName').focus(); return; }
   if (!content) { document.getElementById('fContent').focus(); return; }
+
+  if (fType === 'prompt' && fContentFormat === 'json') {
+    try {
+      JSON.parse(content);
+    } catch (err) {
+      showToast('JSON 格式错误，暂时无法保存');
+      document.getElementById('fContent').focus();
+      return;
+    }
+  }
+
   const tags = document.getElementById('fTags').value.split(/[,，]/).map(t=>t.trim()).filter(Boolean);
   const note = document.getElementById('fNote').value.trim();
 
   if (editId) {
     const item = items.find(i => i.id === editId);
-    Object.assign(item, {type:fType, name, content, tags, note, rating:fRating});
+    Object.assign(item, {
+      type:fType, name, content, tags, note, rating:fRating,
+      contentFormat: fType === 'skill' ? 'md' : fContentFormat,
+      sourceFileName: fSourceFileName
+    });
     if (fImg) { imgCache[editId] = fImg; await dbSaveImg(editId, fImg); }
     else      { delete imgCache[editId]; await dbDeleteImg(editId); }
   } else {
     const maxOrder = items.length ? Math.max(...items.map(i=>i.order||0)) : 0;
     const newId = Date.now();
-    items.unshift({id:newId, type:fType, name, content, tags, note, rating:fRating, order:maxOrder+1, created:newId});
+    items.unshift({
+      id:newId, type:fType, name, content, tags, note, rating:fRating,
+      contentFormat: fType === 'skill' ? 'md' : fContentFormat,
+      sourceFileName: fSourceFileName,
+      order:maxOrder+1, created:newId
+    });
     if (fImg) { imgCache[newId] = fImg; await dbSaveImg(newId, fImg); }
   }
   saveData(); closeModal(); render(); showToast(editId ? '已更新 ✓' : '已创建 ✓');
@@ -735,6 +873,8 @@ function importJSON(e) {
       for (const d of data) {
         if (!ids.has(d.id)) {
           const img = d.img || ''; delete d.img;
+          if (!d.contentFormat) d.contentFormat = d.type === 'skill' ? 'md' : 'text';
+          if (!d.sourceFileName) d.sourceFileName = '';
           if (!d.order) d.order = Date.now() + Math.random();
           items.unshift(d);
           if (img) { imgCache[d.id] = img; await dbSaveImg(d.id, img); }
@@ -919,9 +1059,12 @@ function render() {
   document.getElementById('cardGrid').innerHTML = list.map(item => {
     const img = imgCache[item.id] || '';
     const isPrompt = item.type === 'prompt';
-    const actionBtn = isPrompt
-      ? `<button class="ico-btn" data-action="copy" data-id="${item.id}" data-content="${esc(item.content)}" title="复制提示词"><i class="ti ti-copy"></i></button>`
-      : `<button class="ico-btn dl" data-action="download" data-id="${item.id}" data-name="${esc(item.name)}" data-content="${esc(item.content)}" title="下载 Skill"><i class="ti ti-download"></i></button>`;
+    const isJsonPrompt = isPrompt && item.contentFormat === 'json';
+    const actionBtn = isJsonPrompt
+      ? `<button class="ico-btn dl" data-action="download" data-id="${item.id}" data-name="${esc(item.sourceFileName || item.name)}" data-content="${esc(item.content)}" data-ext="json" data-mime="application/json" data-toast="JSON 提示词已下载 ✓" title="下载 JSON 提示词"><i class="ti ti-download"></i></button>`
+      : isPrompt
+        ? `<button class="ico-btn" data-action="copy" data-id="${item.id}" data-content="${esc(item.content)}" title="复制提示词"><i class="ti ti-copy"></i></button>`
+        : `<button class="ico-btn dl" data-action="download" data-id="${item.id}" data-name="${esc(item.sourceFileName || item.name)}" data-content="${esc(item.content)}" data-ext="md" data-mime="text/markdown" data-toast="Skill 已下载 ✓" title="下载 Skill"><i class="ti ti-download"></i></button>`;
 
     return `
     <div class="card" data-id="${item.id}"
@@ -946,7 +1089,7 @@ function render() {
       <div class="card-body">
         <div class="card-head">
           <span class="card-name">${esc(item.name)}</span>
-          <span class="type-badge ${isPrompt?'b-prompt':'b-skill'}">${isPrompt?'提示词':'Skill'}</span>
+          <span class="type-badge ${isJsonPrompt?'b-json':(isPrompt?'b-prompt':'b-skill')}">${isJsonPrompt?'JSON 提示词':(isPrompt?'提示词':'Skill')}</span>
         </div>
         <p class="card-text" data-tooltip="${esc(item.content)}">${esc(item.content)}</p>
         ${item.tags.length ? `<div class="card-tags">${item.tags.map(t=>`<span class="card-tag">#${esc(t)}</span>`).join('')}</div>` : ''}
@@ -996,14 +1139,23 @@ function setupDelegation() {
     }
 
     if (action === 'download') {
-      const name    = el.dataset.name;
-      const content = el.dataset.content;
-      const blob = new Blob([content], {type:'text/plain'});
+      const name    = el.dataset.name || 'prompt';
+      const content = el.dataset.content || '';
+      const ext     = el.dataset.ext || 'txt';
+      const mime    = el.dataset.mime || 'text/plain';
+      const toast   = el.dataset.toast || '文件已下载 ✓';
+      const cleanName = name.replace(/[/\\?%*:|"<>]/g,'_');
+      const fileName = cleanName.toLowerCase().endsWith('.' + ext.toLowerCase())
+        ? cleanName
+        : cleanName + '.' + ext;
+      const blob = new Blob([content], {type:mime});
       const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = name.replace(/[/\\?%*:|"<>]/g,'_') + '.md';
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = fileName;
       a.click();
-      showToast('Skill 已下载 ✓');
+      setTimeout(() => URL.revokeObjectURL(url), 500);
+      showToast(toast);
       return;
     }
 
@@ -1037,6 +1189,8 @@ function openEditById(id) {
   const item = items.find(i => i.id === id); if (!item) return;
   editId = id;
   document.getElementById('modalTitle').textContent = '编辑';
+  fContentFormat = item.contentFormat || (item.type === 'skill' ? 'md' : 'text');
+  fSourceFileName = item.sourceFileName || '';
   selType(item.type);
   document.getElementById('fName').value    = item.name;
   document.getElementById('fContent').value = item.content;
@@ -1090,6 +1244,9 @@ async function init() {
   });
   document.getElementById('mdDrop').addEventListener('click', () => {
     document.getElementById('mdFile').click();
+  });
+  document.getElementById('jsonDrop').addEventListener('click', () => {
+    document.getElementById('jsonFile').click();
   });
 }
 
